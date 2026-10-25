@@ -127,13 +127,21 @@ namespace CoGSaveManager
 				currentLine = lastErrorLine = null;
 			}
 
-			if( lookaheadBranches > LookaheadBranchLimit )
+			if( lookaheadBranches >= LookaheadBranchLimit )
 				tree.Append( "<color=" ).Append( DimColor ).Append( ">Stopped after " ).Append( LookaheadBranchLimit ).Append( " branches; press - for a shallower tree.</color>\n" );
 
 			if( tree.Length > 0 )
 				result.Add( tree.ToString().TrimEnd( '\n' ) );
 
 			return result.ToArray();
+		}
+
+		private class Branch
+		{
+			public LookaheadTrace trace;
+			public SceneData nextScene;
+			public JSONNode nextState;
+			public List<string> changes;
 		}
 
 		private void AppendChoiceTree( FileStream fs, SceneData choiceScene, int choiceLine, JSONNode state, int depth, int level, StringBuilder tree, List<string> result )
@@ -143,6 +151,48 @@ namespace CoGSaveManager
 			List<ChoiceOption> options = ParseChoiceOptions( choiceLine );
 			string pad = new string( ' ', level * 6 ), detailPad = pad + "      ";
 			List<string> scratch = new List<string>( 1 );
+
+			// First play every selectable option forward, so that changes they all share can be listed once
+			Dictionary<ChoiceOption, Branch> branches = new Dictionary<ChoiceOption, Branch>();
+			foreach( ChoiceOption option in options )
+			{
+				if( option.hidden || option.disabled || lookaheadBranches >= LookaheadBranchLimit )
+					continue;
+
+				lookaheadBranches++;
+				scene = choiceScene;
+				saveData = state.Clone();
+				saveData["lineNum"] = option.line + 1;
+				lookahead = new LookaheadTrace();
+				try
+				{
+					ExtractChoicesInternal( fs, scratch );
+				}
+				catch( Exception e )
+				{
+					lookahead.error = e.Message;
+				}
+
+				branches[option] = new Branch() { trace = lookahead, nextScene = scene, nextState = saveData, changes = GetChanges( state, saveData, choiceScene != scene ) };
+				lookahead = null;
+			}
+
+			List<string> shared = new List<string>();
+			if( branches.Count >= 2 )
+			{
+				foreach( string change in new List<Branch>( branches.Values )[0].changes )
+				{
+					bool everywhere = true;
+					foreach( Branch branch in branches.Values )
+						everywhere &= branch.changes.Contains( change );
+
+					if( everywhere )
+						shared.Add( change );
+				}
+
+				if( shared.Count > 0 )
+					tree.Append( pad ).Append( "<color=" ).Append( DimColor ).Append( ">Every option: </color>" ).Append( string.Join( ", ", shared.ToArray() ) ).Append( '\n' );
+			}
 
 			foreach( ChoiceOption option in options )
 			{
@@ -164,28 +214,20 @@ namespace CoGSaveManager
 				}
 
 				tree.Append( '\n' );
-				if( ++lookaheadBranches > LookaheadBranchLimit )
-					return;
-
-				scene = choiceScene;
-				saveData = state.Clone();
-				saveData["lineNum"] = option.line + 1;
-				lookahead = new LookaheadTrace();
-				try
+				Branch result1;
+				if( !branches.TryGetValue( option, out result1 ) )
 				{
-					ExtractChoicesInternal( fs, scratch );
-				}
-				catch( Exception e )
-				{
-					lookahead.error = e.Message;
+					tree.Append( detailPad ).Append( "<color=" ).Append( DimColor ).Append( ">(not followed: too many branches)</color>\n" );
+					continue;
 				}
 
-				LookaheadTrace trace = lookahead;
-				lookahead = null;
-				SceneData nextScene = scene;
-				JSONNode nextState = saveData;
+				LookaheadTrace trace = result1.trace;
+				List<string> own = result1.changes.FindAll( ( change ) => !shared.Contains( change ) );
+				if( own.Count > 0 )
+					tree.Append( detailPad ).Append( string.Join( ", ", own.ToArray() ) ).Append( '\n' );
+				else
+					tree.Append( detailPad ).Append( "<color=" ).Append( DimColor ).Append( shared.Count > 0 ? ">nothing else</color>\n" : ">no stat changes</color>\n" );
 
-				AppendChanges( state, nextState, choiceScene != nextScene, detailPad, tree );
 				if( trace.jumps.Count > 0 )
 					tree.Append( detailPad ).Append( "<color=" ).Append( OtherCommandLineColor ).Append( ">-> " ).Append( string.Join( " -> ", trace.jumps.ToArray() ) ).Append( "</color>\n" );
 				if( trace.random )
@@ -196,19 +238,16 @@ namespace CoGSaveManager
 				if( trace.choiceLine >= 0 )
 				{
 					if( depth > 1 )
-						AppendChoiceTree( fs, nextScene, trace.choiceLine, nextState, depth - 1, level + 1, tree, result );
+						AppendChoiceTree( fs, result1.nextScene, trace.choiceLine, result1.nextState, depth - 1, level + 1, tree, result );
 					else
-						tree.Append( detailPad ).Append( "<color=" ).Append( DimColor ).Append( ">then a choice at " ).Append( nextScene.Name ).Append( " line " ).Append( trace.choiceLine + 1 ).Append( "</color>\n" );
+						tree.Append( detailPad ).Append( "<color=" ).Append( DimColor ).Append( ">then a choice at " ).Append( result1.nextScene.Name ).Append( " line " ).Append( trace.choiceLine + 1 ).Append( "</color>\n" );
 				}
 				else if( trace.stop != null )
 					tree.Append( detailPad ).Append( "<color=" ).Append( DimColor ).Append( ">then " ).Append( trace.stop ).Append( "</color>\n" );
-
-				if( lookaheadBranches > LookaheadBranchLimit )
-					return;
-
-				scene = choiceScene;
-				saveData = state;
 			}
+
+			scene = choiceScene;
+			saveData = state;
 		}
 
 		/// Lists the choice's options with whether each is shown and selectable, evaluating the *if blocks they sit in.
@@ -312,18 +351,15 @@ namespace CoGSaveManager
 			return option;
 		}
 
-		/// Writes what changed between two states: stats always, temps only while still in the same scene (a new scene resets them).
-		private void AppendChanges( JSONNode before, JSONNode after, bool sceneChanged, string pad, StringBuilder tree )
+		/// What changed between two states: stats always, temps only while still in the same scene (a new scene resets them).
+		private List<string> GetChanges( JSONNode before, JSONNode after, bool sceneChanged )
 		{
 			List<string> changes = new List<string>( 4 );
 			CollectChanges( before["stats"], after["stats"], false, changes );
 			if( !sceneChanged )
 				CollectChanges( before["temps"], after["temps"], true, changes );
 
-			if( changes.Count == 0 )
-				tree.Append( pad ).Append( "<color=" ).Append( DimColor ).Append( ">no stat changes</color>\n" );
-			else
-				tree.Append( pad ).Append( string.Join( ", ", changes.ToArray() ) ).Append( '\n' );
+			return changes;
 		}
 
 		private void CollectChanges( JSONNode before, JSONNode after, bool temps, List<string> changes )

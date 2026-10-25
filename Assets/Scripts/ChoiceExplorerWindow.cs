@@ -271,10 +271,10 @@ namespace CoGSaveManager
 
 		private bool WrapLines
 		{
-			get { return PlayerPrefs.GetInt( "WrapLines", 0 ) == 1; }
+			get { return PlayerPrefs.GetInt( "WrapLinesV2", 1 ) == 1; }
 			set
 			{
-				PlayerPrefs.SetInt( "WrapLines", value ? 1 : 0 );
+				PlayerPrefs.SetInt( "WrapLinesV2", value ? 1 : 0 );
 				PlayerPrefs.Save();
 			}
 		}
