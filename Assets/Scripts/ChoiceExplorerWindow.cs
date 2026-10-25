@@ -310,6 +310,8 @@ namespace CoGSaveManager
 		{
 			if( contentPrevWidth != scrollView.content.rect.width )
 				RefreshEntriesLayoutGroup();
+
+			UpdateLookaheadHotkeys();
 		}
 
 		public void Show( string savePath, string gameAsarFilePath )
@@ -355,6 +357,8 @@ namespace CoGSaveManager
 			if( extractedTexts.Length == 0 )
 				extractedTexts = new string[] { "No choice found..." };
 
+			string[] treeTexts = BuildLookahead();
+
 			foreach( Text oldEntry in activeEntries )
 			{
 				oldEntry.gameObject.SetActive( false );
@@ -364,6 +368,7 @@ namespace CoGSaveManager
 			}
 
 			activeEntries.Clear();
+			SetTreeEntries( treeTexts );
 
 			for( int i = 0; i < extractedTexts.Length; i++ )
 				InsertNewEntryAt( i, extractedTexts[i] );
@@ -424,7 +429,7 @@ namespace CoGSaveManager
 			entry.fontSize = FontSize;
 			entry.horizontalOverflow = WrapLines ? HorizontalWrapMode.Wrap : HorizontalWrapMode.Overflow;
 			entry.text = text;
-			entry.rectTransform.SetSiblingIndex( index + 1 ); /// The first sibling index belongs to <see cref="loadMoreLinesAtTopButton"/>.
+			entry.rectTransform.SetSiblingIndex( index + 1 + treeEntries.Count ); /// The lookahead tree comes first, then <see cref="loadMoreLinesAtTopButton"/>.
 			activeEntries.Insert( index, entry );
 		}
 
@@ -435,11 +440,13 @@ namespace CoGSaveManager
 			// If Shift key is held, copy the whole scene contents. Otherwise, copy only the visible lines.
 			if( !Input.GetKey( KeyCode.LeftShift ) && !Input.GetKey( KeyCode.RightShift ) )
 			{
+				foreach( Text entry in treeEntries )
+					sb.Append( entry.text ).Append( '\n' );
 				foreach( Text entry in activeEntries )
 					sb.Append( entry.text ).Append( '\n' );
 
 				sb.Replace( "<b>", "" ).Replace( "</b>", "" ).Replace( "<color=" + ChoiceLineColor + ">", "" ).Replace( "<color=" + ConditionLineColor + ">", "" )
-					.Replace( "<color=" + VariableSetterLineColor + ">", "" ).Replace( "<color=" + OtherCommandLineColor + ">", "" ).Replace( "<color=" + VariableValueColor + ">", "" ).Replace( "</color>", "" );
+					.Replace( "<color=" + VariableSetterLineColor + ">", "" ).Replace( "<color=" + OtherCommandLineColor + ">", "" ).Replace( "<color=" + VariableValueColor + ">", "" ).Replace( "<color=" + DimColor + ">", "" ).Replace( "</color>", "" );
 			}
 			else if( scene != null )
 			{
@@ -467,6 +474,8 @@ namespace CoGSaveManager
 
 				foreach( Text entry in activeEntries )
 					entry.horizontalOverflow = wrapLines ? HorizontalWrapMode.Wrap : HorizontalWrapMode.Overflow;
+				foreach( Text entry in treeEntries )
+					entry.horizontalOverflow = wrapLines ? HorizontalWrapMode.Wrap : HorizontalWrapMode.Overflow;
 
 				RefreshEntriesLayoutGroup();
 			}
@@ -479,6 +488,8 @@ namespace CoGSaveManager
 				FontSize = fontSize;
 
 				foreach( Text entry in activeEntries )
+					entry.fontSize = fontSize;
+				foreach( Text entry in treeEntries )
 					entry.fontSize = fontSize;
 
 				RefreshEntriesLayoutGroup();
@@ -689,7 +700,7 @@ namespace CoGSaveManager
 				scene = GetScene( fs, saveData["stats"]["sceneName"] );
 
 			/// <see cref="TEST_SCENARIO_FILE"/> allows testing the parser with a custom scenario.
-			if( File.Exists( TEST_SCENARIO_FILE ) )
+			if( lookahead == null && File.Exists( TEST_SCENARIO_FILE ) )
 			{
 				string[] lines = File.ReadAllText( TEST_SCENARIO_FILE ).Replace( "\r", "" ).Split( '\n' );
 				if( lines[0] != "*skip_test" )
@@ -717,6 +728,12 @@ namespace CoGSaveManager
 
 			for( ; lineNumber < scene.Lines.Length; lineNumber++ )
 			{
+				if( lookahead != null && ++lookahead.steps > LookaheadStepLimit )
+				{
+					lookahead.stop = "gave up after " + LookaheadStepLimit + " lines (a loop?)";
+					break;
+				}
+
 				string line = OnCurrentLineChanged( scene.Lines[lineNumber].Trim() );
 				if( IsLineChoiceOption( line ) )
 				{
@@ -741,6 +758,12 @@ namespace CoGSaveManager
 
 				if( command == "choice" || command == "fake_choice" )
 				{
+					if( lookahead != null )
+					{
+						lookahead.choiceLine = lineNumber;
+						break;
+					}
+
 					topLineNumber = lineNumber;
 					AppendLineToResult( scene.Lines[lineNumber], result );
 					int indentation = CalculateLineIndentation( lineNumber );
@@ -752,6 +775,12 @@ namespace CoGSaveManager
 				}
 				else if( command == "input_text" || command == "input_number" )
 				{
+					if( lookahead != null )
+					{
+						lookahead.stop = "*" + command + " (" + line.Substring( command.Length + 1 ).Trim() + ")";
+						break;
+					}
+
 					topLineNumber = lineNumber;
 					for( int i = 0; i < 50 && lineNumber < scene.Lines.Length; i++, lineNumber++ )
 						AppendLineToResult( scene.Lines[lineNumber], result );
@@ -858,6 +887,8 @@ namespace CoGSaveManager
 						value = Token.Number( Random.Range( (float) minValue, (float) maxValue - Mathf.Epsilon ) );
 
 					SetVariable( arguments[0].AsVariableName(), value );
+					if( lookahead != null )
+						lookahead.random = true;
 
 					SaveManager.LogVerbose( "<b>=== Evaluated expression {0}</b>", value );
 				}
@@ -877,8 +908,8 @@ namespace CoGSaveManager
 				}
 				else if( command == "finish" || command == "finish_advertisement" )
 				{
-					// "*finish" will show a "Next Chapter" button if the page isn't empty
-					if( anyPageContentEncountered )
+					// "*finish" will show a "Next Chapter" button if the page isn't empty (lookahead clicks through it)
+					if( anyPageContentEncountered && lookahead == null )
 						break;
 
 					// 'startup' scene may not appear in "*scene_list" (it doesn't in 'The Fernweh Saga: Book One')
@@ -888,9 +919,16 @@ namespace CoGSaveManager
 					{
 						scene = GetScene( fs, scenesList[currentSceneIndex + 1] );
 						lineNumber = -1;
+						if( lookahead != null )
+							lookahead.Jump( "*finish: " + scene.Name );
 					}
 					else
+					{
+						if( lookahead != null )
+							lookahead.stop = "the end of the game";
+
 						break;
+					}
 				}
 				else if( command == "goto" || command == "gosub" || command == "gotoref" )
 				{
@@ -904,6 +942,8 @@ namespace CoGSaveManager
 
 					List<Token> arguments;
 					ParseGosubCommand( command, line, out lineNumber, out arguments );
+					if( lookahead != null && lineNumber >= 0 && lineNumber < scene.Lines.Length )
+						lookahead.Jump( ( command == "gosub" ? "*gosub " : "" ) + scene.Lines[lineNumber].Trim().Replace( "*label ", "" ) );
 					if( command == "gosub" )
 						SetVariable( "param", new JSONArray( ( arguments.Count > 1 ) ? arguments.GetRange( 1, arguments.Count - 1 ).ConvertAll( ( token ) => (JSONNode) token ) : new List<JSONNode>() ), true );
 				}
@@ -930,6 +970,8 @@ namespace CoGSaveManager
 					List<Token> arguments = GetCommandArguments( line, sceneAndLabelNameEvaluationFlags, sceneAndLabelNameEvaluationFlags );
 					scene = GetScene( fs, arguments[0].AsVariableName() );
 					lineNumber = ( arguments.Count >= 2 ) ? scene.GetLabelLineNumber( arguments[1].AsVariableName() ) : -1;
+					if( lookahead != null )
+						lookahead.Jump( "*" + command + " " + scene.Name + ( arguments.Count >= 2 ? " " + arguments[1].AsVariableName() : "" ) );
 					JSONArray param = new JSONArray( ( arguments.Count > 2 ) ? arguments.GetRange( 2, arguments.Count - 2 ).ConvertAll( ( token ) => (JSONNode) token ) : new List<JSONNode>() );
 					saveData["temps"] = new JSONObject();
 					SetVariable( "param", param, true );
@@ -972,12 +1014,18 @@ namespace CoGSaveManager
 				}
 				else if( command == "page_break" || command == "page_break_advertisement" )
 				{
-					// "*page_break" will show a "Next" button if the page isn't empty
-					if( anyPageContentEncountered )
+					// "*page_break" will show a "Next" button if the page isn't empty (lookahead clicks through it)
+					if( anyPageContentEncountered && lookahead == null )
 						break;
 				}
 				else if( command == "restart" )
 				{
+					if( lookahead != null )
+					{
+						lookahead.stop = "*restart";
+						break;
+					}
+
 					saveData["stats"].Clear();
 					saveData["temps"].Clear();
 
@@ -988,10 +1036,15 @@ namespace CoGSaveManager
 				else if( command == "reset" )
 					LogError( "*reset command isn't supported by ChoiceExplorer." );
 				else if( command == "delay_break" || command == "goto_random_scene" || command == "ending" || command == "delay_ending" || command == "abort" || command == "restore_game" )
+				{
+					if( lookahead != null )
+						lookahead.stop = "*" + command;
+
 					break;
+				}
 			}
 
-			if( lineNumber < scene.Lines.Length && topLineNumber < 0 )
+			if( lookahead == null && lineNumber < scene.Lines.Length && topLineNumber < 0 )
 			{
 				AppendLineToResult( scene.Lines[lineNumber] + " <b>(No choice found...)</b>", result );
 				topLineNumber = bottomLineNumber = lineNumber;
@@ -1789,6 +1842,14 @@ namespace CoGSaveManager
 
 		private static void LogError( string message )
 		{
+			if( lookahead != null ) // Lookahead shows its first error on its branch instead
+			{
+				if( lookahead.error == null )
+					lookahead.error = message;
+
+				return;
+			}
+
 			if( lastErrorLine != currentLine && !string.IsNullOrEmpty( currentLine ) )
 			{
 				string errorLineMessage = string.Format( "<b>Error(s) while evaluating: {0}</b>", currentLine.Trim() );

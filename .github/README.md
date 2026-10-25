@@ -1,5 +1,13 @@
 # Choice of Games Save Manager for Steam (Unofficial)
 
+## This fork: the lookahead tree
+
+The **Choices** window now opens on a tree of what each option does, worked out from the save: for every option, the stats it changes (old value, new value and the difference), the labels and scenes it jumps to, and then the options of the choice it leads to, 2 choices deep by default. Press **+** or **-** in the window to go deeper (up to 5) or shallower (0 turns the tree off). Hidden and unselectable options are listed with their condition. Page breaks and chapter ends are clicked through. A *rand shows one possible roll, and is marked.
+
+The window also opens and refreshes by itself on every new automated save, so the tree follows you through the story without clicking. The original source view stays below the tree.
+
+Built with Unity 2020.3. The Windows build is on this fork's Releases page.
+
 ![Screenshot](Images/MainWindow.png)
 
 This is a hobby Unity project that helps manage save files for [Choice of Games](https://store.steampowered.com/search/?publisher=Choice%20of%20Games) and [Hosted Games](https://store.steampowered.com/search/?publisher=Hosted%20Games) that are published on **Steam** platform (tested on Windows only).

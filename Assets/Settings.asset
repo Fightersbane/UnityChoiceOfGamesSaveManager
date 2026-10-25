@@ -15,5 +15,5 @@ MonoBehaviour:
   IgnoreArticlesWhileSortingGames: 0
   UIResolution: 600
   UIPixelPerfect: 1
-  AutoShowChoiceExplorer: 0
+  AutoShowChoiceExplorer: 1
   VerboseLogging: 0
